@@ -21,10 +21,10 @@ Android スマホで、近くにある AirPods の **電池残量** と **位置
 
 ## インストール方法
 
-### 方法1: GitHub Actions でビルドされた APK を使う
-1. GitHub のこのリポジトリの **Actions** タブを開く
-2. 最新の「Build APK」を開き、下部の **Artifacts** から `AirBattery-debug-apk` をダウンロード
-3. zip を展開した `app-debug.apk` をスマホに入れてインストール(「提供元不明のアプリ」の許可が必要です)
+### 方法1: Releases から APK をダウンロード(おすすめ)
+1. スマホのブラウザで https://github.com/momijan111/air-battery/releases/latest を開く
+2. **Assets** の中の `AirBattery.apk` をタップしてダウンロード
+3. ダウンロードした APK をタップしてインストール(「提供元不明のアプリ」の許可が必要です)
 
 ### 方法2: Android Studio でビルド
 1. Android Studio でこのフォルダを開く
