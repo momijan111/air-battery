@@ -17,6 +17,8 @@ import android.os.SystemClock
 class AirPodsScanner(
     context: Context,
     private val onResult: (status: AirPodsParser.Status, rssi: Int) -> Unit,
+    /** 診断用: 受信した Apple の信号すべて(解析できたかどうかに関係なく) */
+    private val onRaw: (data: ByteArray?, rssi: Int) -> Unit = { _, _ -> },
 ) {
     private val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
     private val recent = mutableMapOf<String, Pair<ScanResult, Long>>()
@@ -28,6 +30,7 @@ class AirPodsScanner(
     }
 
     private fun handle(result: ScanResult) {
+        onRaw(result.scanRecord?.getManufacturerSpecificData(AirPodsParser.APPLE_MANUFACTURER_ID), result.rssi)
         val now = SystemClock.elapsedRealtimeNanos()
         recent[result.device.address] = result to now
         recent.entries.removeAll { now - it.value.second > 10_000_000_000L }
@@ -42,8 +45,9 @@ class AirPodsScanner(
     fun start(): Boolean {
         val scanner = adapter?.takeIf { it.isEnabled }?.bluetoothLeScanner ?: return false
         if (running) return true
-        val data = ByteArray(AirPodsParser.DATA_LENGTH).also { it[0] = 0x07; it[1] = 0x19 }
-        val mask = ByteArray(AirPodsParser.DATA_LENGTH).also { it[0] = -1; it[1] = -1 }
+        // 診断のため、長さを問わず先頭が 0x07 の Apple の信号をすべて受け取る
+        val data = byteArrayOf(0x07)
+        val mask = byteArrayOf(-1)
         val filter = ScanFilter.Builder()
             .setManufacturerData(AirPodsParser.APPLE_MANUFACTURER_ID, data, mask)
             .build()

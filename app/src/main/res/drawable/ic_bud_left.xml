@@ -1,0 +1,9 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <!-- 左耳用イヤホン(ステムが下に伸びる) -->
+    <path android:strokeColor="#FF1F2430" android:strokeWidth="1.8" android:fillColor="#00000000"
+        android:strokeLineJoin="round" android:strokeLineCap="round"
+        android:pathData="M9,3.5C6.5,3.5 4.5,5.4 4.5,7.8C4.5,10 6.2,11.4 8.2,11.6L8.6,20.5C8.6,21.1 9.1,21.5 9.7,21.5H10.4C11,21.5 11.4,21.1 11.4,20.5V12.3C12.8,12.8 14.3,12.5 15,11.4C15.6,10.4 15.2,9.2 14.2,8.7C13.6,5.6 11.6,3.5 9,3.5Z"/>
+    <path android:strokeColor="#FF1F2430" android:strokeWidth="1.8" android:strokeLineCap="round"
+        android:pathData="M10,13V19.5"/>
+</vector>

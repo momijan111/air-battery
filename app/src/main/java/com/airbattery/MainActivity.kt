@@ -18,7 +18,18 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -41,6 +52,13 @@ class MainActivity : ComponentActivity() {
     private var lastSeen by mutableStateOf<LastSeenStore.LastSeen?>(null)
     private var message by mutableStateOf<String?>(null)
 
+    // 診断情報
+    private var rawCount by mutableStateOf(0)
+    private var rawLastHex by mutableStateOf<String?>(null)
+    private var rawLastLen by mutableStateOf<Int?>(null)
+    private var rawLastRssi by mutableStateOf<Int?>(null)
+    private var locationEnabled by mutableStateOf<Boolean?>(null)
+
     private lateinit var scanner: AirPodsScanner
     private lateinit var store: LastSeenStore
 
@@ -62,15 +80,20 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         store = LastSeenStore(this)
         lastSeen = store.load()
-        scanner = AirPodsScanner(this) { s, r ->
-            runOnUiThread { onAirPodsSeen(s, r) }
-        }
-        setContent {
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    Screen()
+        scanner = AirPodsScanner(
+            this,
+            onResult = { s, r -> runOnUiThread { onAirPodsSeen(s, r) } },
+            onRaw = { d, r ->
+                runOnUiThread {
+                    rawCount++
+                    rawLastLen = d?.size
+                    rawLastRssi = r
+                    rawLastHex = d?.joinToString("") { "%02X".format(it) }
                 }
-            }
+            },
+        )
+        setContent {
+            MaterialTheme { Screen() }
         }
     }
 
@@ -94,6 +117,8 @@ class MainActivity : ComponentActivity() {
             return
         }
         refreshConnectedDevices()
+        val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        locationEnabled = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) lm.isLocationEnabled else null
         message = if (scanner.start()) null else "Bluetooth がオフになっています。オンにしてください。"
     }
 
@@ -102,6 +127,7 @@ class MainActivity : ComponentActivity() {
         rssi = r
         val now = System.currentTimeMillis()
         lastUpdate = now
+        updateKnown(s, now)
         // 位置の記録は30秒に1回まで
         if (now - (lastSeen?.timeMillis ?: 0L) > 30_000L) {
             val loc = lastKnownLocation()
@@ -146,24 +172,69 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // ---------------- 画面 ----------------
+
+    private val Bg = Color(0xFFEEF0F6)
+    private val CardBg = Color(0xFFF8F7FC)
+    private val TileBg = Color(0xFFE9EAF1)
+    private val Accent = Color(0xFF4A5B8C)
+    private val Track = Color(0xFFDCDFE8)
+    private val PillBg = Color(0xFFC9D5F7)
+    private val TextMain = Color(0xFF1F2430)
+    private val TextSub = Color(0xFF5C6170)
+
+    /** 各パーツの最後にわかった残量と、その時刻 */
+    private data class Known(val percent: Int, val time: Long)
+    private var knownLeft by mutableStateOf<Known?>(null)
+    private var knownRight by mutableStateOf<Known?>(null)
+    private var knownCase by mutableStateOf<Known?>(null)
+
+    private fun updateKnown(s: AirPodsParser.Status, now: Long) {
+        s.leftPercent?.let { knownLeft = Known(it, now) }
+        s.rightPercent?.let { knownRight = Known(it, now) }
+        s.casePercent?.let { knownCase = Known(it, now) }
+    }
+
+    private fun openAppSettings() {
+        startActivity(
+            Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                .setData(Uri.fromParts("package", packageName, null))
+        )
+    }
+
     @Composable
     private fun Screen() {
+        // 「N分前」表示を更新するため 15 秒ごとに再描画
+        var tick by remember { mutableStateOf(0L) }
+        LaunchedEffect(Unit) {
+            while (true) { tick = System.currentTimeMillis(); kotlinx.coroutines.delay(15_000) }
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .background(Bg)
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .systemBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
-            Text("AirBattery", fontSize = 28.sp, fontWeight = FontWeight.Bold)
+            Row(Modifier.fillMaxWidth().padding(start = 8.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("AirBattery", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = TextSub, modifier = Modifier.weight(1f))
+                Box(
+                    Modifier.size(48.dp).clip(CircleShape).background(PillBg.copy(alpha = 0.6f)).clickable { openAppSettings() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(painterResource(R.drawable.ic_settings), contentDescription = "設定", tint = TextMain, modifier = Modifier.size(24.dp))
+                }
+            }
 
             message?.let { msg ->
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-                    Column(Modifier.padding(16.dp)) {
-                        Text(msg)
+                Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Color(0xFFFFDAD6)).padding(20.dp)) {
+                    Column {
+                        Text(msg, color = Color(0xFF410002))
                         if (requiredPermissions.any { !hasPermission(it) }) {
                             Spacer(Modifier.height(8.dp))
-                            Button(onClick = { permissionLauncher.launch(requiredPermissions) }) {
+                            Button(onClick = { permissionLauncher.launch(requiredPermissions) }, colors = ButtonDefaults.buttonColors(containerColor = Accent)) {
                                 Text("権限を許可する")
                             }
                         }
@@ -171,79 +242,157 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            ConnectedCard()
-            BatteryCard()
+            MainCard(tick)
             LocationCard()
+            DiagnosticsCard()
 
             Text(
                 "※ 電池残量は AirPods が発信する Bluetooth 信号(Apple 非公開の形式)を解析して表示しています。" +
                     "10% 単位で、近くにある他人の AirPods を拾う可能性もあります。",
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp, color = TextSub, modifier = Modifier.padding(horizontal = 8.dp),
             )
+            Spacer(Modifier.height(16.dp))
         }
     }
 
     @Composable
-    private fun ConnectedCard() {
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp)) {
-                Text("接続中のオーディオ機器", fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(4.dp))
-                if (connectedNames.isEmpty()) Text("なし") else connectedNames.forEach { Text(it) }
-                TextButton(onClick = { refreshConnectedDevices() }) { Text("再読み込み") }
+    private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
+        Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(32.dp)).background(CardBg).padding(24.dp),
+            content = content,
+        )
+    }
+
+    @Composable
+    private fun MainCard(now: Long) {
+        val s = status
+        val live = s != null && System.currentTimeMillis() - lastUpdate < 15_000L
+        val connected = connectedNames.isNotEmpty()
+        SectionCard {
+            // 状態ピル
+            val pill = when {
+                live -> "検出中"
+                connected -> "接続中"
+                else -> "未接続"
             }
-        }
-    }
+            Row(
+                Modifier.clip(RoundedCornerShape(50)).background(if (live || connected) PillBg else TileBg)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(10.dp).clip(CircleShape).background(if (live || connected) Accent else TextSub))
+                Spacer(Modifier.width(10.dp))
+                Text(pill, fontWeight = FontWeight.SemiBold, color = Color(0xFF2C3A66))
+            }
+            Spacer(Modifier.height(16.dp))
+            Text(
+                s?.model ?: connectedNames.firstOrNull() ?: "AirPods",
+                fontSize = 30.sp, fontWeight = FontWeight.Bold, color = TextMain,
+            )
+            Spacer(Modifier.height(24.dp))
 
-    @Composable
-    private fun BatteryCard() {
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp)) {
-                val s = status
-                if (s == null) {
-                    Text("電池残量", fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(8.dp))
-                    Text("AirPods を探しています… ケースのふたを開けるか、耳に装着してください。")
-                    Spacer(Modifier.height(8.dp))
-                    LinearProgressIndicator(Modifier.fillMaxWidth())
-                    return@Column
-                }
-                Text(s.model, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                BatteryRing("左", R.drawable.ic_bud_left, knownLeft, live && s?.leftCharging == true, Modifier.weight(1f))
+                BatteryRing("右", R.drawable.ic_bud_right, knownRight, live && s?.rightCharging == true, Modifier.weight(1f))
+                BatteryRing("ケース", R.drawable.ic_case, knownCase, live && s?.caseCharging == true, Modifier.weight(1f))
+            }
+            if (s == null) {
                 Spacer(Modifier.height(12.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    BatteryItem("左", s.leftPercent, s.leftCharging, s.leftInEar)
-                    BatteryItem("右", s.rightPercent, s.rightCharging, s.rightInEar)
-                    BatteryItem("ケース", s.casePercent, s.caseCharging, null)
-                }
-                Spacer(Modifier.height(8.dp))
                 Text(
-                    "最終更新: " + DateFormat.getTimeInstance().format(Date(lastUpdate)),
-                    fontSize = 12.sp,
+                    "AirPods を探しています… ケースのふたを開けるか、耳に装着してください。",
+                    fontSize = 13.sp, color = TextSub,
                 )
             }
+            Spacer(Modifier.height(24.dp))
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                val wear = when {
+                    !live -> "--"
+                    s!!.leftInEar && s.rightInEar -> "両耳を装着"
+                    s.leftInEar -> "左耳のみ装着"
+                    s.rightInEar -> "右耳のみ装着"
+                    else -> "装着していない"
+                }
+                InfoTile("装着", wear, Modifier.weight(1f))
+                InfoTile("音声の出力先", connectedNames.firstOrNull() ?: "なし", Modifier.weight(1f)) { refreshConnectedDevices() }
+            }
         }
     }
 
     @Composable
-    private fun BatteryItem(label: String, percent: Int?, charging: Boolean, inEar: Boolean?) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(label)
-            Text(percent?.let { "$it%" } ?: "--", fontSize = 26.sp, fontWeight = FontWeight.Bold)
-            if (percent != null) {
-                LinearProgressIndicator(progress = { percent / 100f }, modifier = Modifier.width(72.dp))
+    private fun BatteryRing(label: String, icon: Int, known: Known?, charging: Boolean, modifier: Modifier) {
+        val ageMs = known?.let { System.currentTimeMillis() - it.time }
+        val stale = ageMs != null && ageMs > 30_000L
+        val progress = (known?.percent ?: 0) / 100f
+        Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.size(104.dp), contentAlignment = Alignment.Center) {
+                Canvas(Modifier.fillMaxSize().padding(6.dp)) {
+                    val stroke = 9.dp.toPx()
+                    drawArc(Track, 0f, 360f, false, style = Stroke(stroke))
+                    if (progress > 0f) {
+                        drawArc(
+                            if (stale) Accent.copy(alpha = 0.45f) else Accent,
+                            -90f, 360f * progress, false, style = Stroke(stroke, cap = StrokeCap.Round),
+                        )
+                    }
+                }
+                Icon(painterResource(icon), contentDescription = label, tint = TextMain, modifier = Modifier.size(44.dp))
+                if (charging) {
+                    Box(
+                        Modifier.align(Alignment.BottomEnd).padding(end = 4.dp, bottom = 4.dp).size(26.dp).clip(CircleShape).background(Accent),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(painterResource(R.drawable.ic_bolt), contentDescription = "充電中", tint = Color.White, modifier = Modifier.size(16.dp))
+                    }
+                }
             }
-            if (charging) Text("⚡充電中", fontSize = 12.sp)
-            if (inEar == true) Text("装着中", fontSize = 12.sp)
+            Spacer(Modifier.height(8.dp))
+            Text(label, color = TextSub, fontSize = 15.sp)
+            Text(known?.let { "${it.percent}%" } ?: "--", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = TextMain)
+            val sub = when {
+                charging -> "充電中"
+                stale -> "前回 · " + ago(ageMs!!)
+                else -> ""
+            }
+            Text(sub, fontSize = 13.sp, color = TextSub)
+        }
+    }
+
+    private fun ago(ms: Long): String {
+        val min = ms / 60_000
+        return when {
+            min < 1 -> "1分以内"
+            min < 60 -> "${min}分前"
+            else -> "${min / 60}時間前"
+        }
+    }
+
+    @Composable
+    private fun InfoTile(title: String, value: String, modifier: Modifier, onClick: (() -> Unit)? = null) {
+        Column(
+            modifier.clip(RoundedCornerShape(28.dp)).background(TileBg)
+                .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+        ) {
+            Text(title, fontSize = 13.sp, color = TextSub)
+            Spacer(Modifier.height(4.dp))
+            Text(value, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextMain, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+
+    @Composable
+    private fun SectionTitle(title: String, sub: String? = null) {
+        Column(Modifier.padding(start = 8.dp, bottom = 12.dp)) {
+            Text(title, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = TextMain)
+            sub?.let { Text(it, fontSize = 14.sp, color = TextSub) }
         }
     }
 
     @Composable
     private fun LocationCard() {
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp)) {
-                Text("位置", fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(4.dp))
+        Column {
+            SectionTitle("位置", "AirPods 自体の現在地は Android からは取得できません")
+            SectionCard {
                 val r = rssi
                 if (r != null && System.currentTimeMillis() - lastUpdate < 15_000L) {
                     val level = when {
@@ -251,28 +400,52 @@ class MainActivity : ComponentActivity() {
                         r >= -55 -> "近い"
                         else -> "やや離れている"
                     }
-                    Text("電波の強さ: $r dBm（$level）")
-                    Text(
-                        "※ 電波の強さによる目安です。正確な距離ではありません。",
-                        fontSize = 12.sp,
-                    )
+                    Text(level, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = TextMain)
+                    Text("電波の強さ $r dBm（正確な距離ではありません）", fontSize = 13.sp, color = TextSub)
                 } else {
-                    Text("現在、近くで検出されていません。")
+                    Text("近くで検出されていません", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextMain)
                 }
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(16.dp))
                 val seen = lastSeen
-                if (seen == null) {
-                    Text("最後に検出した場所: 記録なし")
-                } else {
-                    Text("最後に検出した日時: " + DateFormat.getDateTimeInstance().format(Date(seen.timeMillis)))
-                    if (seen.lat != null && seen.lon != null) {
-                        Text("場所(スマホの位置): %.5f, %.5f".format(seen.lat, seen.lon))
-                        seen.accuracyM?.let { Text("精度: 約 ${it.toInt()} m", fontSize = 12.sp) }
-                        Button(onClick = { openMap(seen) }) { Text("地図で開く") }
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(TileBg).padding(20.dp)) {
+                    Text("最後に検出した場所(スマホの位置)", fontSize = 13.sp, color = TextSub)
+                    Spacer(Modifier.height(4.dp))
+                    if (seen == null) {
+                        Text("記録なし", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextMain)
                     } else {
-                        Text("位置情報は取得できませんでした。")
+                        Text(DateFormat.getDateTimeInstance().format(Date(seen.timeMillis)), fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextMain)
+                        if (seen.lat != null && seen.lon != null) {
+                            Text("%.5f, %.5f".format(seen.lat, seen.lon) + (seen.accuracyM?.let { "（精度 約${it.toInt()}m）" } ?: ""), fontSize = 13.sp, color = TextSub)
+                            Spacer(Modifier.height(8.dp))
+                            Button(onClick = { openMap(seen) }, colors = ButtonDefaults.buttonColors(containerColor = Accent)) { Text("地図で開く") }
+                        } else {
+                            Text("位置情報は取得できませんでした", fontSize = 13.sp, color = TextSub)
+                        }
                     }
                 }
+            }
+        }
+    }
+
+    @Composable
+    private fun DiagnosticsCard() {
+        var open by remember { mutableStateOf(true) }
+        Column {
+            Row(Modifier.fillMaxWidth().clickable { open = !open }, verticalAlignment = Alignment.CenterVertically) {
+                SectionTitle("診断情報", if (open) "タップで閉じる" else "タップで開く")
+            }
+            if (!open) return@Column
+            SectionCard {
+                val t = 13.sp
+                Text(
+                    "スマホの位置情報: " + when (locationEnabled) { true -> "オン"; false -> "オフ"; null -> "確認できません" },
+                    fontSize = t, color = TextMain,
+                )
+                Text("受信した Apple の信号(先頭 0x07): $rawCount 件", fontSize = t, color = TextMain)
+                Text("最後の信号の長さ: ${rawLastLen?.let { "$it バイト" } ?: "--"}（解析対象は ${AirPodsParser.DATA_LENGTH} バイト）", fontSize = t, color = TextMain)
+                Text("最後の信号の電波の強さ: ${rawLastRssi?.let { "$it dBm" } ?: "--"}（表示対象は ${AirPodsScanner.MIN_RSSI} dBm 以上）", fontSize = t, color = TextMain)
+                Text("最後の信号のデータ:", fontSize = t, color = TextMain)
+                Text(rawLastHex ?: "--", fontSize = 11.sp, color = TextSub)
             }
         }
     }
