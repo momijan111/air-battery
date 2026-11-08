@@ -58,8 +58,27 @@ object AirPodsParser {
         }
     }
 
-    /** AirPods のデータ形式(先頭 0x07 0x19、長さ27バイト)であれば解析結果を返す */
-    fun parse(data: ByteArray?): Status? {
+    /**
+     * Apple のメーカー固有データは「種類(1バイト) 長さ(1バイト) 中身」の並びになっている。
+     * その中から種類 0x07 のかたまりを探し、「種類+長さ+中身」を返す。見つからなければ null。
+     */
+    fun findProximityPairing(data: ByteArray?): ByteArray? {
+        if (data == null) return null
+        var i = 0
+        while (i + 1 < data.size) {
+            val type = data[i].toInt() and 0xFF
+            val len = data[i + 1].toInt() and 0xFF
+            val end = i + 2 + len
+            if (type == 0x07) return data.copyOfRange(i, minOf(end, data.size))
+            if (end > data.size) return null
+            i = end
+        }
+        return null
+    }
+
+    /** Apple のデータの中に AirPods 形式(0x07 0x19、計27バイト)のかたまりがあれば解析結果を返す */
+    fun parse(appleData: ByteArray?): Status? {
+        val data = findProximityPairing(appleData)
         if (data == null || data.size != DATA_LENGTH) return null
         if (data[0].toInt() != 0x07 || data[1].toInt() != 0x19) return null
 

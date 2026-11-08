@@ -57,6 +57,11 @@ class MainActivity : ComponentActivity() {
     private var allCount by mutableStateOf(0)
     private var appleCount by mutableStateOf(0)
     private var scanError by mutableStateOf<Int?>(null)
+    /** Apple の信号を種類(先頭バイト)ごとに数えたもの */
+    private val appleTypes = mutableStateMapOf<Int, Int>()
+    /** 送信元ごとの最新の Apple の信号(16進, 電波の強さ, 時刻) */
+    private data class AppleSample(val hex: String, val rssi: Int, val time: Long)
+    private val appleSamples = mutableStateMapOf<String, AppleSample>()
     private var scanStarted by mutableStateOf(false)
     private var rawLastHex by mutableStateOf<String?>(null)
     private var rawLastLen by mutableStateOf<Int?>(null)
@@ -87,16 +92,25 @@ class MainActivity : ComponentActivity() {
         scanner = AirPodsScanner(
             this,
             onResult = { s, r -> runOnUiThread { onAirPodsSeen(s, r) } },
-            onRaw = { d, r ->
+            onRaw = { addr, d, r ->
                 runOnUiThread {
                     allCount++
                     if (d != null) {
                         appleCount++
-                        if (d.isNotEmpty() && d[0].toInt() == 0x07) {
+                        val hex = d.joinToString("") { "%02X".format(it) }
+                        if (d.isNotEmpty()) {
+                            val type = d[0].toInt() and 0xFF
+                            appleTypes[type] = (appleTypes[type] ?: 0) + 1
+                        }
+                        val now = System.currentTimeMillis()
+                        appleSamples[addr] = AppleSample(hex, r, now)
+                        appleSamples.entries.removeAll { now - it.value.time > 15_000L }
+                        val block = AirPodsParser.findProximityPairing(d)
+                        if (block != null) {
                             rawCount++
-                            rawLastLen = d.size
+                            rawLastLen = block.size
                             rawLastRssi = r
-                            rawLastHex = d.joinToString("") { "%02X".format(it) }
+                            rawLastHex = block.joinToString("") { "%02X".format(it) }
                         }
                     }
                 }
@@ -439,6 +453,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun copyDiagnostics(top: List<AppleSample>) {
+        val text = buildString {
+            appendLine("Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) ${Build.MANUFACTURER} ${Build.MODEL}")
+            appendLine("all=$allCount apple=$appleCount airpods=$rawCount scanError=$scanError")
+            appendLine("types=" + appleTypes.entries.sortedByDescending { it.value }.joinToString(",") { "%02X:%d".format(it.key, it.value) })
+            appendLine("last0x07=$rawLastHex rssi=$rawLastRssi")
+            top.forEach { appendLine("${it.rssi} ${it.hex}") }
+        }
+        val cm = getSystemService(android.content.ClipboardManager::class.java)
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("AirBattery 診断情報", text))
+        Toast.makeText(this, "コピーしました", Toast.LENGTH_SHORT).show()
+    }
+
     @Composable
     private fun DiagnosticsCard() {
         var open by remember { mutableStateOf(true) }
@@ -458,11 +485,26 @@ class MainActivity : ComponentActivity() {
                 Text("スキャン開始: " + (if (scanStarted) "成功" else "未開始") + (scanError?.let { "（失敗 エラーコード $it）" } ?: ""), fontSize = t, color = TextMain)
                 Text("受信した信号(すべての機器): $allCount 件", fontSize = t, color = TextMain)
                 Text("うち Apple の信号: $appleCount 件", fontSize = t, color = TextMain)
-                Text("うち AirPods 形式(先頭 0x07): $rawCount 件", fontSize = t, color = TextMain)
+                Text(
+                    "Apple の信号の種類(先頭バイト): " + appleTypes.entries.sortedByDescending { it.value }
+                        .joinToString(", ") { "%02X=%d件".format(it.key, it.value) }.ifEmpty { "--" },
+                    fontSize = t, color = TextMain,
+                )
+                Text("うち AirPods 形式(種類 0x07 を含む): $rawCount 件", fontSize = t, color = TextMain)
                 Text("最後の信号の長さ: ${rawLastLen?.let { "$it バイト" } ?: "--"}（解析対象は ${AirPodsParser.DATA_LENGTH} バイト）", fontSize = t, color = TextMain)
                 Text("最後の信号の電波の強さ: ${rawLastRssi?.let { "$it dBm" } ?: "--"}（表示対象は ${AirPodsScanner.MIN_RSSI} dBm 以上）", fontSize = t, color = TextMain)
                 Text("最後の信号のデータ:", fontSize = t, color = TextMain)
                 Text(rawLastHex ?: "--", fontSize = 11.sp, color = TextSub)
+                Spacer(Modifier.height(12.dp))
+                Text("電波の強い Apple の信号(直近15秒・上位8件):", fontSize = t, color = TextMain)
+                val top = appleSamples.values.sortedByDescending { it.rssi }.take(8)
+                if (top.isEmpty()) Text("--", fontSize = 11.sp, color = TextSub)
+                top.forEach { Text("${it.rssi}dBm  ${it.hex}", fontSize = 11.sp, color = TextSub) }
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = { copyDiagnostics(top) },
+                    colors = ButtonDefaults.buttonColors(containerColor = Accent),
+                ) { Text("診断情報をコピー") }
             }
         }
     }

@@ -40,6 +40,14 @@ class AirPodsParserTest {
     }
 
     @Test
+    fun findsBlockAfterOtherBlock() {
+        // 先頭に別の種類(0x10, 長さ2)のかたまりがあり、その後ろに AirPods 形式がある場合
+        val data = hex("10" + "02" + "AABB") + sample("0E20", "2A", "86", "15")
+        val s = AirPodsParser.parse(data)!!
+        assertEquals(60, s.leftPercent)
+    }
+
+    @Test
     fun rejectsOtherData() {
         assertNull(AirPodsParser.parse(null))
         assertNull(AirPodsParser.parse(ByteArray(10)))

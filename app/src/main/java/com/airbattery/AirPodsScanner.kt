@@ -17,7 +17,7 @@ class AirPodsScanner(
     context: Context,
     private val onResult: (status: AirPodsParser.Status, rssi: Int) -> Unit,
     /** 診断用: 受信したすべての信号(Apple 以外も含む)。appleData は Apple 以外なら null */
-    private val onRaw: (appleData: ByteArray?, rssi: Int) -> Unit = { _, _ -> },
+    private val onRaw: (address: String, appleData: ByteArray?, rssi: Int) -> Unit = { _, _, _ -> },
     /** 診断用: スキャン開始に失敗したときのエラーコード */
     private val onFailed: (errorCode: Int) -> Unit = {},
 ) {
@@ -36,7 +36,7 @@ class AirPodsScanner(
 
     private fun handle(result: ScanResult) {
         val data = result.scanRecord?.getManufacturerSpecificData(AirPodsParser.APPLE_MANUFACTURER_ID)
-        onRaw(data, result.rssi)
+        onRaw(result.device.address, data, result.rssi)
         // AirPods 形式として解析できる信号だけを候補にする
         if (AirPodsParser.parse(data) == null) return
         val now = SystemClock.elapsedRealtimeNanos()
