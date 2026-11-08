@@ -84,6 +84,7 @@ class AapClient(private val listener: Listener) {
                         try { Thread.sleep(CONNECT_TIMEOUT_MS) } catch (_: InterruptedException) { return@Thread }
                         if (!s.isConnected) runCatching { s.close() }
                     }.also { it.start() }
+                    val t0 = System.currentTimeMillis()
                     try {
                         s.connect()
                         watchdog.interrupt()
@@ -101,9 +102,9 @@ class AapClient(private val listener: Listener) {
                         step("切断されました")
                     } catch (e: Throwable) {
                         watchdog.interrupt()
-                        val timedOut = !s.isConnected && e is IOException
-                        step("[$attempt] $method 失敗: ${e.javaClass.simpleName} ${e.message ?: ""}" +
-                            if (timedOut) "（${CONNECT_TIMEOUT_MS / 1000}秒以内に完了しないと打ち切ります）" else "")
+                        val ms = System.currentTimeMillis() - t0
+                        val note = if (ms >= CONNECT_TIMEOUT_MS) "（時間切れで打ち切り）" else ""
+                        step("[$attempt] $method 失敗(${ms}ミリ秒後): ${e.javaClass.simpleName} ${e.message ?: ""}$note")
                     } finally {
                         runCatching { s.close() }
                         socket = null

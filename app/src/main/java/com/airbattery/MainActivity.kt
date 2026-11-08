@@ -103,6 +103,33 @@ class MainActivity : ComponentActivity() {
         override fun onPacket(hex: String) { aapPacket = hex }
     })
 
+    /** Android が HFP 経由で受け取っている残量(1つの値)。-1 は不明 */
+    private var systemBattery by mutableStateOf<Int?>(null)
+    private var systemBatteryInfo by mutableStateOf("未確認")
+
+    private val batteryReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val level = intent.getIntExtra("android.bluetooth.device.extra.BATTERY_LEVEL", -1)
+            systemBattery = level.takeIf { it in 0..100 }
+            systemBatteryInfo = "通知を受信: $level"
+        }
+    }
+
+    /** 非公開の BluetoothDevice.getBatteryLevel() を呼んで残量を取得する */
+    private fun readSystemBattery(device: BluetoothDevice) {
+        try {
+            org.lsposed.hiddenapibypass.HiddenApiBypass.addHiddenApiExemptions("Landroid/bluetooth/")
+            val level = org.lsposed.hiddenapibypass.HiddenApiBypass.invoke(
+                BluetoothDevice::class.java, device, "getBatteryLevel"
+            ) as Int
+            systemBattery = level.takeIf { it in 0..100 }
+            systemBatteryInfo = "getBatteryLevel() = $level"
+        } catch (e: Throwable) {
+            val c = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+            systemBatteryInfo = "getBatteryLevel() 失敗: ${c.javaClass.simpleName} ${c.message ?: ""}"
+        }
+    }
+
     private lateinit var scanner: AirPodsScanner
     private lateinit var store: LastSeenStore
 
@@ -152,6 +179,11 @@ class MainActivity : ComponentActivity() {
             },
             onFailed = { code -> runOnUiThread { scanError = code } },
         )
+        ContextCompat.registerReceiver(
+            this, batteryReceiver,
+            android.content.IntentFilter("android.bluetooth.device.action.BATTERY_LEVEL_CHANGED"),
+            ContextCompat.RECEIVER_EXPORTED,
+        )
         setContent {
             MaterialTheme { Screen() }
         }
@@ -170,6 +202,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         aap.disconnect()
+        runCatching { unregisterReceiver(batteryReceiver) }
     }
 
     private fun hasPermission(p: String) =
@@ -225,6 +258,7 @@ class MainActivity : ComponentActivity() {
                     ?: devices.firstOrNull()
                 runOnUiThread {
                     connectedNames = names
+                    if (target != null) readSystemBattery(target)
                     if (target != null && !aap.isConnected) aap.connect(target)
                 }
                 adapter.closeProfileProxy(profile, proxy)
@@ -369,7 +403,11 @@ class MainActivity : ComponentActivity() {
                 BatteryRing("右", R.drawable.ic_bud_right, knownRight, (live && s?.rightCharging == true) || (aapConnected && chargeRight), Modifier.weight(1f))
                 BatteryRing("ケース", R.drawable.ic_case, knownCase, (live && s?.caseCharging == true) || (aapConnected && chargeCase), Modifier.weight(1f))
             }
-            if (s == null && knownLeft == null && knownRight == null && knownCase == null) {
+            systemBattery?.let { lv ->
+                Spacer(Modifier.height(16.dp))
+                InfoTile("Android が受け取った残量（左右まとめた1つの値）", "$lv%", Modifier.fillMaxWidth())
+            }
+            if (s == null && knownLeft == null && knownRight == null && knownCase == null && systemBattery == null) {
                 Spacer(Modifier.height(12.dp))
                 Text(
                     "AirPods を探しています… ケースのふたを開けるか、耳に装着してください。",
@@ -555,6 +593,7 @@ class MainActivity : ComponentActivity() {
     private fun copyDiagnostics(top: List<AppleSample>) {
         val text = buildString {
             appendLine("Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) ${Build.MANUFACTURER} ${Build.MODEL}")
+            appendLine("system=$systemBatteryInfo")
             appendLine("aap=$aapState")
             appendLine("aapLast=$aapPacket")
             appendLine("all=$allCount apple=$appleCount airpods=$rawCount scanError=$scanError")
@@ -581,6 +620,7 @@ class MainActivity : ComponentActivity() {
                     "スマホの位置情報: " + when (locationEnabled) { true -> "オン"; false -> "オフ"; null -> "確認できません" },
                     fontSize = t, color = TextMain,
                 )
+                Text("Android の残量情報: $systemBatteryInfo", fontSize = t, color = TextMain)
                 Text("AAP(直接通信): $aapState", fontSize = t, color = TextMain)
                 Text("AAP 最後の受信: ${aapPacket ?: "--"}", fontSize = 11.sp, color = TextSub)
                 TextButton(onClick = { aap.disconnect(); aapConnected = false; aapState = "再接続します…"; refreshConnectedDevices() }) {
