@@ -3,7 +3,6 @@ package com.airbattery
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
@@ -17,8 +16,10 @@ import android.os.SystemClock
 class AirPodsScanner(
     context: Context,
     private val onResult: (status: AirPodsParser.Status, rssi: Int) -> Unit,
-    /** 診断用: 受信した Apple の信号すべて(解析できたかどうかに関係なく) */
-    private val onRaw: (data: ByteArray?, rssi: Int) -> Unit = { _, _ -> },
+    /** 診断用: 受信したすべての信号(Apple 以外も含む)。appleData は Apple 以外なら null */
+    private val onRaw: (appleData: ByteArray?, rssi: Int) -> Unit = { _, _ -> },
+    /** 診断用: スキャン開始に失敗したときのエラーコード */
+    private val onFailed: (errorCode: Int) -> Unit = {},
 ) {
     private val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
     private val recent = mutableMapOf<String, Pair<ScanResult, Long>>()
@@ -27,17 +28,25 @@ class AirPodsScanner(
     private val callback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) = handle(result)
         override fun onBatchScanResults(results: MutableList<ScanResult>) = results.forEach(::handle)
+        override fun onScanFailed(errorCode: Int) {
+            running = false
+            onFailed(errorCode)
+        }
     }
 
     private fun handle(result: ScanResult) {
-        onRaw(result.scanRecord?.getManufacturerSpecificData(AirPodsParser.APPLE_MANUFACTURER_ID), result.rssi)
+        val data = result.scanRecord?.getManufacturerSpecificData(AirPodsParser.APPLE_MANUFACTURER_ID)
+        onRaw(data, result.rssi)
+        // AirPods 形式として解析できる信号だけを候補にする
+        if (AirPodsParser.parse(data) == null) return
         val now = SystemClock.elapsedRealtimeNanos()
         recent[result.device.address] = result to now
         recent.entries.removeAll { now - it.value.second > 10_000_000_000L }
         val best = recent.values.maxByOrNull { it.first.rssi }?.first ?: return
         if (best.rssi < MIN_RSSI) return
-        val data = best.scanRecord?.getManufacturerSpecificData(AirPodsParser.APPLE_MANUFACTURER_ID)
-        val status = AirPodsParser.parse(data) ?: return
+        val status = AirPodsParser.parse(
+            best.scanRecord?.getManufacturerSpecificData(AirPodsParser.APPLE_MANUFACTURER_ID)
+        ) ?: return
         onResult(status, best.rssi)
     }
 
@@ -45,16 +54,11 @@ class AirPodsScanner(
     fun start(): Boolean {
         val scanner = adapter?.takeIf { it.isEnabled }?.bluetoothLeScanner ?: return false
         if (running) return true
-        // 診断のため、長さを問わず先頭が 0x07 の Apple の信号をすべて受け取る
-        val data = byteArrayOf(0x07)
-        val mask = byteArrayOf(-1)
-        val filter = ScanFilter.Builder()
-            .setManufacturerData(AirPodsParser.APPLE_MANUFACTURER_ID, data, mask)
-            .build()
+        // 診断のため、フィルタなしで周囲の信号をすべて受け取り、コード側で判定する
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
-        scanner.startScan(listOf(filter), settings, callback)
+        scanner.startScan(null, settings, callback)
         running = true
         return true
     }

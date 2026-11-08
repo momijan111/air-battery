@@ -54,6 +54,10 @@ class MainActivity : ComponentActivity() {
 
     // 診断情報
     private var rawCount by mutableStateOf(0)
+    private var allCount by mutableStateOf(0)
+    private var appleCount by mutableStateOf(0)
+    private var scanError by mutableStateOf<Int?>(null)
+    private var scanStarted by mutableStateOf(false)
     private var rawLastHex by mutableStateOf<String?>(null)
     private var rawLastLen by mutableStateOf<Int?>(null)
     private var rawLastRssi by mutableStateOf<Int?>(null)
@@ -85,12 +89,19 @@ class MainActivity : ComponentActivity() {
             onResult = { s, r -> runOnUiThread { onAirPodsSeen(s, r) } },
             onRaw = { d, r ->
                 runOnUiThread {
-                    rawCount++
-                    rawLastLen = d?.size
-                    rawLastRssi = r
-                    rawLastHex = d?.joinToString("") { "%02X".format(it) }
+                    allCount++
+                    if (d != null) {
+                        appleCount++
+                        if (d.isNotEmpty() && d[0].toInt() == 0x07) {
+                            rawCount++
+                            rawLastLen = d.size
+                            rawLastRssi = r
+                            rawLastHex = d.joinToString("") { "%02X".format(it) }
+                        }
+                    }
                 }
             },
+            onFailed = { code -> runOnUiThread { scanError = code } },
         )
         setContent {
             MaterialTheme { Screen() }
@@ -119,7 +130,8 @@ class MainActivity : ComponentActivity() {
         refreshConnectedDevices()
         val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         locationEnabled = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) lm.isLocationEnabled else null
-        message = if (scanner.start()) null else "Bluetooth がオフになっています。オンにしてください。"
+        scanStarted = scanner.start()
+        message = if (scanStarted) null else "Bluetooth がオフになっています。オンにしてください。"
     }
 
     private fun onAirPodsSeen(s: AirPodsParser.Status, r: Int) {
@@ -441,7 +453,12 @@ class MainActivity : ComponentActivity() {
                     "スマホの位置情報: " + when (locationEnabled) { true -> "オン"; false -> "オフ"; null -> "確認できません" },
                     fontSize = t, color = TextMain,
                 )
-                Text("受信した Apple の信号(先頭 0x07): $rawCount 件", fontSize = t, color = TextMain)
+                Text("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) / ${Build.MANUFACTURER} ${Build.MODEL}", fontSize = t, color = TextMain)
+                Text("権限: " + requiredPermissions.joinToString(" / ") { it.substringAfterLast('.') + "=" + (if (hasPermission(it)) "許可" else "未許可") }, fontSize = t, color = TextMain)
+                Text("スキャン開始: " + (if (scanStarted) "成功" else "未開始") + (scanError?.let { "（失敗 エラーコード $it）" } ?: ""), fontSize = t, color = TextMain)
+                Text("受信した信号(すべての機器): $allCount 件", fontSize = t, color = TextMain)
+                Text("うち Apple の信号: $appleCount 件", fontSize = t, color = TextMain)
+                Text("うち AirPods 形式(先頭 0x07): $rawCount 件", fontSize = t, color = TextMain)
                 Text("最後の信号の長さ: ${rawLastLen?.let { "$it バイト" } ?: "--"}（解析対象は ${AirPodsParser.DATA_LENGTH} バイト）", fontSize = t, color = TextMain)
                 Text("最後の信号の電波の強さ: ${rawLastRssi?.let { "$it dBm" } ?: "--"}（表示対象は ${AirPodsScanner.MIN_RSSI} dBm 以上）", fontSize = t, color = TextMain)
                 Text("最後の信号のデータ:", fontSize = t, color = TextMain)
