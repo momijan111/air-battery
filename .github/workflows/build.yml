@@ -4,18 +4,31 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
       - name: Test and build
         run: ./gradlew testDebugUnitTest assembleDebug
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk AirBattery.apk
       - uses: actions/upload-artifact@v4
         with:
           name: AirBattery-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: AirBattery.apk
+      # ログインなしでダウンロードできるよう Releases にも APK を置く
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: AirBattery (build ${{ github.run_number }})
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          files: AirBattery.apk
