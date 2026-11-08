@@ -11,6 +11,15 @@ Android スマホで、近くにある AirPods の **電池残量** と **位置
 | 接続中の機器 | スマホに Bluetooth(A2DP) で接続中のオーディオ機器名 |
 | 位置 | ・いま近くにあるときは電波の強さ(dBm)による「近い/やや離れている」の目安<br>・アプリが最後に AirPods を検出した日時と、そのときの**スマホの位置**を記録し、地図アプリで開けます |
 
+## AAP 直接通信(実験的)
+
+スマホに接続中の AirPods と AAP (Apple Accessory Protocol) で直接通信し、1% 単位の電池残量・装着状態の取得と、ノイズコントロールの切り替えを試みます。
+
+- パケット形式は [LibrePods の資料](https://github.com/librepods-org/librepods/blob/main/docs/AAP%20Definitions.md)(AirPods Pro 2 で調査されたもの)に基づきます。
+- 接続には Android の非公開 API `BluetoothDevice.createInsecureL2capSocket(0x1001)` を [HiddenApiBypass](https://github.com/LSPosed/AndroidHiddenApiBypass) 経由で使います。
+- LibrePods の README では、Android 16 では Pixel (QPR3) / ColorOS・OxygenOS 16 / realme UI 7.0 以外は root が必要とされています。それ以外の端末では接続できない可能性があります。接続結果は画面の「診断情報」に表示されます。
+- 資料内で左右の部位番号の説明が食い違っているため、左右が逆に表示される可能性があります(資料の表に従い 04=左, 02=右 としています)。
+
 ## 制限事項(大事)
 
 - **AirPods 自体の現在地は Android からは取得できません。** AirPods の現在地を表示する「探す(Find My)」は Apple の機能で、Android 向けには提供されていません。このアプリの「位置」は、*アプリが最後に AirPods を検出したときのスマホの位置* です。

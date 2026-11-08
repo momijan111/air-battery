@@ -68,6 +68,40 @@ class MainActivity : ComponentActivity() {
     private var rawLastRssi by mutableStateOf<Int?>(null)
     private var locationEnabled by mutableStateOf<Boolean?>(null)
 
+    // AAP(直接通信)の状態
+    private var aapState by mutableStateOf("未接続")
+    private var aapPacket by mutableStateOf<String?>(null)
+    private var aapMode by mutableStateOf<Int?>(null)
+    private var aapEar by mutableStateOf<Pair<Int, Int>?>(null)
+    private var aapConnected by mutableStateOf(false)
+    private var chargeLeft by mutableStateOf(false)
+    private var chargeRight by mutableStateOf(false)
+    private var chargeCase by mutableStateOf(false)
+
+    private val aap = AapClient(object : AapClient.Listener {
+        override fun onState(state: String) {
+            aapState = state
+            aapConnected = state == "接続しました"
+        }
+        override fun onBattery(items: List<AapClient.Battery>) {
+            val now = System.currentTimeMillis()
+            items.forEach { b ->
+                if (b.status == 4) return@forEach // 未接続(ケース外など)は残量を更新しない
+                val k = Known(b.level.coerceIn(0, 100), now)
+                val charging = b.status == 1
+                when (b.part) {
+                    AapClient.Part.LEFT -> { knownLeft = k; chargeLeft = charging }
+                    AapClient.Part.RIGHT -> { knownRight = k; chargeRight = charging }
+                    AapClient.Part.CASE -> { knownCase = k; chargeCase = charging }
+                    AapClient.Part.UNKNOWN -> {}
+                }
+            }
+        }
+        override fun onListeningMode(mode: Int) { aapMode = mode }
+        override fun onEar(primary: Int, secondary: Int) { aapEar = primary to secondary }
+        override fun onPacket(hex: String) { aapPacket = hex }
+    })
+
     private lateinit var scanner: AirPodsScanner
     private lateinit var store: LastSeenStore
 
@@ -132,6 +166,11 @@ class MainActivity : ComponentActivity() {
         scanner.stop()
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        aap.disconnect()
+    }
+
     private fun hasPermission(p: String) =
         ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
 
@@ -179,8 +218,14 @@ class MainActivity : ComponentActivity() {
         if (!adapter.isEnabled) return
         adapter.getProfileProxy(this, object : BluetoothProfile.ServiceListener {
             override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-                val names = proxy.connectedDevices.map { d: BluetoothDevice -> d.name ?: d.address }
-                runOnUiThread { connectedNames = names }
+                val devices = proxy.connectedDevices
+                val names = devices.map { d: BluetoothDevice -> d.name ?: d.address }
+                val target = devices.firstOrNull { it.name?.contains("AirPods", ignoreCase = true) == true }
+                    ?: devices.firstOrNull()
+                runOnUiThread {
+                    connectedNames = names
+                    if (target != null && !aap.isConnected) aap.connect(target)
+                }
                 adapter.closeProfileProxy(profile, proxy)
             }
             override fun onServiceDisconnected(profile: Int) {}
@@ -269,6 +314,7 @@ class MainActivity : ComponentActivity() {
             }
 
             MainCard(tick)
+            NoiseControl()
             LocationCard()
             DiagnosticsCard()
 
@@ -293,7 +339,7 @@ class MainActivity : ComponentActivity() {
     private fun MainCard(now: Long) {
         val s = status
         val live = s != null && System.currentTimeMillis() - lastUpdate < 15_000L
-        val connected = connectedNames.isNotEmpty()
+        val connected = connectedNames.isNotEmpty() || aapConnected
         SectionCard {
             // 状態ピル
             val pill = when {
@@ -318,11 +364,11 @@ class MainActivity : ComponentActivity() {
             Spacer(Modifier.height(24.dp))
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                BatteryRing("左", R.drawable.ic_bud_left, knownLeft, live && s?.leftCharging == true, Modifier.weight(1f))
-                BatteryRing("右", R.drawable.ic_bud_right, knownRight, live && s?.rightCharging == true, Modifier.weight(1f))
-                BatteryRing("ケース", R.drawable.ic_case, knownCase, live && s?.caseCharging == true, Modifier.weight(1f))
+                BatteryRing("左", R.drawable.ic_bud_left, knownLeft, (live && s?.leftCharging == true) || (aapConnected && chargeLeft), Modifier.weight(1f))
+                BatteryRing("右", R.drawable.ic_bud_right, knownRight, (live && s?.rightCharging == true) || (aapConnected && chargeRight), Modifier.weight(1f))
+                BatteryRing("ケース", R.drawable.ic_case, knownCase, (live && s?.caseCharging == true) || (aapConnected && chargeCase), Modifier.weight(1f))
             }
-            if (s == null) {
+            if (s == null && knownLeft == null && knownRight == null && knownCase == null) {
                 Spacer(Modifier.height(12.dp))
                 Text(
                     "AirPods を探しています… ケースのふたを開けるか、耳に装着してください。",
@@ -332,7 +378,13 @@ class MainActivity : ComponentActivity() {
             Spacer(Modifier.height(24.dp))
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                val ear = aapEar
                 val wear = when {
+                    ear != null -> when {
+                        ear.first == 0 && ear.second == 0 -> "両耳を装着"
+                        ear.first == 0 || ear.second == 0 -> "片耳を装着"
+                        else -> "装着していない"
+                    }
                     !live -> "--"
                     s!!.leftInEar && s.rightInEar -> "両耳を装着"
                     s.leftInEar -> "左耳のみ装着"
@@ -342,6 +394,52 @@ class MainActivity : ComponentActivity() {
                 InfoTile("装着", wear, Modifier.weight(1f))
                 InfoTile("音声の出力先", connectedNames.firstOrNull() ?: "なし", Modifier.weight(1f)) { refreshConnectedDevices() }
             }
+        }
+    }
+
+    @Composable
+    private fun NoiseControl() {
+        val modeName = mapOf(1 to "オフ", 2 to "ノイズキャンセリング", 3 to "外部音取り込み", 4 to "適応型")
+        Column {
+            SectionTitle(
+                "ノイズコントロール",
+                if (!aapConnected) "AirPods と直接通信できたときだけ使えます（${aapState}）"
+                else "現在: " + (aapMode?.let { modeName[it] ?: "不明($it)" } ?: "不明"),
+            )
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(32.dp)).background(CardBg).padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ModeTile("◉", "ノイズキャンセル", "周囲の音を抑える", 2, Modifier.weight(1f))
+                    ModeTile("((•))", "外部音取り込み", "周りの音を聞く", 3, Modifier.weight(1f))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ModeTile("✦", "適応型", "環境に合わせる", 4, Modifier.weight(1f))
+                    ModeTile("⊘", "オフ", "音の調整をしない", 1, Modifier.weight(1f))
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun ModeTile(icon: String, title: String, sub: String, mode: Int, modifier: Modifier) {
+        val selected = aapConnected && aapMode == mode
+        val enabled = aapConnected
+        val fg = when {
+            selected -> Color.White
+            enabled -> TextMain
+            else -> TextSub.copy(alpha = 0.6f)
+        }
+        Column(
+            modifier.clip(RoundedCornerShape(28.dp)).background(if (selected) Accent else TileBg)
+                .clickable(enabled = enabled) { aap.setListeningMode(mode) }
+                .padding(20.dp),
+        ) {
+            Text(icon, fontSize = 22.sp, color = fg)
+            Spacer(Modifier.height(16.dp))
+            Text(title, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = fg)
+            Text(sub, fontSize = 13.sp, color = if (selected) Color.White.copy(alpha = 0.85f) else TextSub)
         }
     }
 
@@ -456,6 +554,8 @@ class MainActivity : ComponentActivity() {
     private fun copyDiagnostics(top: List<AppleSample>) {
         val text = buildString {
             appendLine("Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) ${Build.MANUFACTURER} ${Build.MODEL}")
+            appendLine("aap=$aapState")
+            appendLine("aapLast=$aapPacket")
             appendLine("all=$allCount apple=$appleCount airpods=$rawCount scanError=$scanError")
             appendLine("types=" + appleTypes.entries.sortedByDescending { it.value }.joinToString(",") { "%02X:%d".format(it.key, it.value) })
             appendLine("last0x07=$rawLastHex rssi=$rawLastRssi")
@@ -480,6 +580,8 @@ class MainActivity : ComponentActivity() {
                     "スマホの位置情報: " + when (locationEnabled) { true -> "オン"; false -> "オフ"; null -> "確認できません" },
                     fontSize = t, color = TextMain,
                 )
+                Text("AAP(直接通信): $aapState", fontSize = t, color = TextMain)
+                Text("AAP 最後の受信: ${aapPacket ?: "--"}", fontSize = 11.sp, color = TextSub)
                 Text("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) / ${Build.MANUFACTURER} ${Build.MODEL}", fontSize = t, color = TextMain)
                 Text("権限: " + requiredPermissions.joinToString(" / ") { it.substringAfterLast('.') + "=" + (if (hasPermission(it)) "許可" else "未許可") }, fontSize = t, color = TextMain)
                 Text("スキャン開始: " + (if (scanStarted) "成功" else "未開始") + (scanError?.let { "（失敗 エラーコード $it）" } ?: ""), fontSize = t, color = TextMain)
