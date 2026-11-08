@@ -80,8 +80,9 @@ class MainActivity : ComponentActivity() {
 
     private val aap = AapClient(object : AapClient.Listener {
         override fun onState(state: String) {
+            if (state == AapClient.CONNECTED) { aapConnected = true; return }
             aapState = state
-            aapConnected = state == "接続しました"
+            if (!state.lines().last().endsWith("接続しました")) aapConnected = false
         }
         override fun onBattery(items: List<AapClient.Battery>) {
             val now = System.currentTimeMillis()
@@ -403,7 +404,7 @@ class MainActivity : ComponentActivity() {
         Column {
             SectionTitle(
                 "ノイズコントロール",
-                if (!aapConnected) "AirPods と直接通信できたときだけ使えます（${aapState}）"
+                if (!aapConnected) "AirPods と直接通信できたときだけ使えます（詳細は診断情報）"
                 else "現在: " + (aapMode?.let { modeName[it] ?: "不明($it)" } ?: "不明"),
             )
             Column(
@@ -582,6 +583,9 @@ class MainActivity : ComponentActivity() {
                 )
                 Text("AAP(直接通信): $aapState", fontSize = t, color = TextMain)
                 Text("AAP 最後の受信: ${aapPacket ?: "--"}", fontSize = 11.sp, color = TextSub)
+                TextButton(onClick = { aap.disconnect(); aapConnected = false; aapState = "再接続します…"; refreshConnectedDevices() }) {
+                    Text("AAP を再接続")
+                }
                 Text("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) / ${Build.MANUFACTURER} ${Build.MODEL}", fontSize = t, color = TextMain)
                 Text("権限: " + requiredPermissions.joinToString(" / ") { it.substringAfterLast('.') + "=" + (if (hasPermission(it)) "許可" else "未許可") }, fontSize = t, color = TextMain)
                 Text("スキャン開始: " + (if (scanStarted) "成功" else "未開始") + (scanError?.let { "（失敗 エラーコード $it）" } ?: ""), fontSize = t, color = TextMain)

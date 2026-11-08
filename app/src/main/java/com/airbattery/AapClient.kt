@@ -43,50 +43,98 @@ class AapClient(private val listener: Listener) {
 
     private fun post(block: () -> Unit) = main.post(block)
 
-    @SuppressLint("MissingPermission")
-    private fun openSocket(device: BluetoothDevice): BluetoothSocket {
-        HiddenApiBypass.addHiddenApiExemptions("Landroid/bluetooth/")
-        val method = try {
-            BluetoothDevice::class.java.getMethod("createInsecureL2capSocket", Int::class.javaPrimitiveType)
-        } catch (e: NoSuchMethodException) {
-            HiddenApiBypass.getDeclaredMethod(BluetoothDevice::class.java, "createInsecureL2capSocket", Int::class.javaPrimitiveType)
-        }
-        method.isAccessible = true
-        return method.invoke(device, PSM) as BluetoothSocket
+    /** 非公開 API でクラシック L2CAP のソケットを作る。secure=false なら Insecure 版 */
+    private fun openSocket(device: BluetoothDevice, name: String): BluetoothSocket {
+        runCatching { HiddenApiBypass.addHiddenApiExemptions("Landroid/bluetooth/") }
+        return HiddenApiBypass.invoke(BluetoothDevice::class.java, device, name, PSM) as BluetoothSocket
     }
+
+    /** 接続処理の世代番号。disconnect() や新しい connect() で古い処理を止めるために使う */
+    @Volatile private var generation = 0
 
     @SuppressLint("MissingPermission")
     fun connect(device: BluetoothDevice) {
         if (thread?.isAlive == true) return
+        val gen = ++generation
         val name = device.name ?: device.address
         thread = Thread {
-            try {
-                post { listener.onState("$name に接続中…") }
-                val s = openSocket(device)
-                socket = s
-                s.connect()
-                post { listener.onState("接続しました") }
-                send(HANDSHAKE)
-                send(REQUEST_NOTIFICATIONS)
-                val buf = ByteArray(1024)
-                val input = s.inputStream
-                while (true) {
-                    val n = input.read(buf)
-                    if (n < 0) break
-                    handle(buf.copyOf(n))
-                }
-                post { listener.onState("切断されました") }
-            } catch (e: Throwable) {
-                val cause = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
-                post { listener.onState("接続できませんでした: ${cause.javaClass.simpleName}: ${cause.message}") }
-            } finally {
-                runCatching { socket?.close() }
-                socket = null
+            fun stopped() = gen != generation
+            val log = StringBuilder()
+            fun step(msg: String) {
+                log.appendLine(msg)
+                val text = log.toString().trim()
+                post { listener.onState(text) }
             }
+            var attempt = 0
+            while (!stopped() && attempt < MAX_ATTEMPTS) {
+                attempt++
+                for (method in listOf("createInsecureL2capSocket", "createL2capSocket")) {
+                    if (stopped()) return@Thread
+                    val s = try {
+                        openSocket(device, method)
+                    } catch (e: Throwable) {
+                        val c = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+                        step("[$attempt] $method 作成失敗: ${c.javaClass.simpleName} ${c.message ?: ""}")
+                        continue
+                    }
+                    socket = s
+                    step("[$attempt] $method で $name に接続中…")
+                    // connect() が戻らない場合に備え、時間切れでソケットを閉じる
+                    val watchdog = Thread {
+                        try { Thread.sleep(CONNECT_TIMEOUT_MS) } catch (_: InterruptedException) { return@Thread }
+                        if (!s.isConnected) runCatching { s.close() }
+                    }.also { it.start() }
+                    try {
+                        s.connect()
+                        watchdog.interrupt()
+                        step("[$attempt] 接続しました")
+                        post { listener.onState(CONNECTED) }
+                        primer(s)
+                        val buf = ByteArray(2048)
+                        val input = s.inputStream
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n <= 0) break
+                            handle(buf.copyOf(n))
+                        }
+                        attempt = 0
+                        step("切断されました")
+                    } catch (e: Throwable) {
+                        watchdog.interrupt()
+                        val timedOut = !s.isConnected && e is IOException
+                        step("[$attempt] $method 失敗: ${e.javaClass.simpleName} ${e.message ?: ""}" +
+                            if (timedOut) "（${CONNECT_TIMEOUT_MS / 1000}秒以内に完了しないと打ち切ります）" else "")
+                    } finally {
+                        runCatching { s.close() }
+                        socket = null
+                    }
+                }
+                if (stopped()) break
+                val wait = minOf(500L shl (attempt - 1), 15_000L)
+                try { Thread.sleep(wait) } catch (_: InterruptedException) { break }
+            }
+            if (!stopped()) step("${MAX_ATTEMPTS}回試しましたが接続できませんでした")
         }.also { it.start() }
     }
 
+    /** 接続直後の初期化パケット。AirPods が取りこぼすことがあるため 0秒・0.2秒・5秒 に送る */
+    private fun primer(s: BluetoothSocket) {
+        Thread {
+            fun sendAll() = runCatching {
+                listOf(HANDSHAKE, SET_FEATURES, REQUEST_NOTIFICATIONS).forEach { s.outputStream.write(it); s.outputStream.flush() }
+            }
+            sendAll()
+            try {
+                Thread.sleep(200); sendAll()
+                Thread.sleep(4800); sendAll()
+            } catch (_: InterruptedException) {}
+        }.start()
+    }
+
     fun disconnect() {
+        generation++
+        thread?.interrupt()
+        thread = null
         runCatching { socket?.close() }
         socket = null
     }
@@ -130,6 +178,10 @@ class AapClient(private val listener: Listener) {
 
     companion object {
         const val PSM = 0x1001
+        const val CONNECTED = "接続しました"
+        private const val MAX_ATTEMPTS = 5
+        private const val CONNECT_TIMEOUT_MS = 10_000L
+        val SET_FEATURES = byteArrayOf(0x04, 0x00, 0x04, 0x00, 0x4D, 0x00, 0xFF.toByte(), 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
 
         val HANDSHAKE = byteArrayOf(0x00, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
         val REQUEST_NOTIFICATIONS = byteArrayOf(0x04, 0x00, 0x04, 0x00, 0x0F, 0x00, 0xFF.toByte(), 0xFF.toByte(), 0xFE.toByte(), 0xFF.toByte())
